@@ -1,0 +1,17 @@
+# Rust build artifacts
+target/
+
+# Soroban test harness snapshot files (auto-generated; committed only if you
+# want to pin ledger-state regression tests — see soroban-sdk docs).
+contracts/**/test_snapshots/
+
+# Node / frontend
+node_modules/
+.env
+.env.local
+.env.*.local
+
+# Editor
+.vscode/
+.idea/
+*.swp

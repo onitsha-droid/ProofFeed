@@ -28,7 +28,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, vec, Address, Env, Vec,
+    contract, contractevent, contractimpl, contracttype, vec, Address, Env, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -45,6 +45,35 @@ pub enum DataKey {
     Tiers(Address),
     /// Per-(subscriber, creator) payment history.  Key: (subscriber, creator).
     PaymentHistory(Address, Address),
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// Emitted by `register_creator`.
+#[contractevent]
+pub struct CreatorRegistered {
+    pub creator: Address,
+    pub tier_count: u32,
+}
+
+/// Emitted by `subscribe` and `renew`.
+#[contractevent]
+pub struct PaymentRecorded {
+    pub subscriber: Address,
+    pub creator: Address,
+    pub amount: i128,
+    pub timestamp: u64,
+    pub is_renewal: bool,
+}
+
+/// Emitted by `cancel`.
+#[contractevent]
+pub struct SubscriptionCancelled {
+    pub subscriber: Address,
+    pub creator: Address,
+    pub timestamp: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -145,10 +174,10 @@ impl SubscriptionRegistry {
                 .set(&DataKey::CreatorStats(creator.clone()), &stats);
         }
 
-        env.events().publish(
-            (symbol_short!("reg_crt"), creator),
-            tiers.len(),
-        );
+        env.events().publish_event(&CreatorRegistered {
+            creator,
+            tier_count: tiers.len(),
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -158,7 +187,7 @@ impl SubscriptionRegistry {
     /// Record a new subscription from `subscriber` to `creator` under
     /// `tier_id`.
     ///
-    /// Emits a `PaymentEvent` with `is_renewal = false`.
+    /// Emits a `PaymentRecorded` event with `is_renewal = false`.
     /// Increments `active_subscribers` and `lifetime_revenue` in
     /// `CreatorStats`.
     ///
@@ -177,7 +206,7 @@ impl SubscriptionRegistry {
         let amount = Self::tier_price(&env, &creator, tier_id);
         let timestamp = env.ledger().timestamp();
 
-        // Record payment event.
+        // Record payment event in subscriber history.
         let event = PaymentEvent {
             subscriber: subscriber.clone(),
             creator: creator.clone(),
@@ -185,7 +214,7 @@ impl SubscriptionRegistry {
             timestamp,
             is_renewal: false,
         };
-        Self::append_payment_event(&env, &subscriber, &creator, event.clone());
+        Self::append_payment_event(&env, &subscriber, &creator, event);
 
         // Update creator aggregate stats.
         let mut stats = Self::load_or_default_stats(&env, &creator);
@@ -195,12 +224,15 @@ impl SubscriptionRegistry {
             .persistent()
             .set(&DataKey::CreatorStats(creator.clone()), &stats);
 
-        // Emit structured on-chain event (README: subscriber, creator, amount,
-        // timestamp, is_renewal).
-        env.events().publish(
-            (symbol_short!("subscribe"), subscriber, creator),
-            (amount, timestamp, false),
-        );
+        // Emit on-chain event (README: subscriber, creator, amount, timestamp,
+        // is_renewal).
+        env.events().publish_event(&PaymentRecorded {
+            subscriber,
+            creator,
+            amount,
+            timestamp,
+            is_renewal: false,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -209,7 +241,7 @@ impl SubscriptionRegistry {
 
     /// Record a subscription renewal for an existing subscriber/creator pair.
     ///
-    /// Emits a `PaymentEvent` with `is_renewal = true`.
+    /// Emits a `PaymentRecorded` event with `is_renewal = true`.
     /// Adds to `lifetime_revenue`; does NOT change `active_subscribers`
     /// because the subscriber is already counted as active.
     ///
@@ -238,7 +270,7 @@ impl SubscriptionRegistry {
             timestamp,
             is_renewal: true,
         };
-        Self::append_payment_event(&env, &subscriber, &creator, event.clone());
+        Self::append_payment_event(&env, &subscriber, &creator, event);
 
         // Only update revenue; active count stays the same.
         let mut stats = Self::load_or_default_stats(&env, &creator);
@@ -247,10 +279,13 @@ impl SubscriptionRegistry {
             .persistent()
             .set(&DataKey::CreatorStats(creator.clone()), &stats);
 
-        env.events().publish(
-            (symbol_short!("renew"), subscriber, creator),
-            (amount, timestamp, true),
-        );
+        env.events().publish_event(&PaymentRecorded {
+            subscriber,
+            creator,
+            amount,
+            timestamp,
+            is_renewal: true,
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -262,7 +297,8 @@ impl SubscriptionRegistry {
     /// Decrements `active_subscribers` (floored at 0) and increments
     /// `churn_events` in `CreatorStats`.
     ///
-    /// Does NOT emit a `PaymentEvent` because no money moves on cancel.
+    /// Does NOT emit a `PaymentRecorded` event because no money moves on
+    /// cancel.
     ///
     /// TODO(auth): add `subscriber.require_auth()`.
     pub fn cancel(env: Env, subscriber: Address, creator: Address) {
@@ -275,10 +311,11 @@ impl SubscriptionRegistry {
             .persistent()
             .set(&DataKey::CreatorStats(creator.clone()), &stats);
 
-        env.events().publish(
-            (symbol_short!("cancel"), subscriber, creator),
-            env.ledger().timestamp(),
-        );
+        env.events().publish_event(&SubscriptionCancelled {
+            subscriber,
+            creator,
+            timestamp: env.ledger().timestamp(),
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -373,3 +410,5 @@ impl SubscriptionRegistry {
         0
     }
 }
+
+mod tests;

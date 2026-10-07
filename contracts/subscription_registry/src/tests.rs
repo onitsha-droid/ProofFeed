@@ -1,32 +1,41 @@
-//! Unit tests for SubscriptionRegistry — happy path for all 6 interface
-//! functions.
+//! Tests for SubscriptionRegistry.
 //!
-//! Uses the Soroban `testutils` harness so tests run entirely in-process
-//! without a running network.
+//! Coverage:
+//!   - Happy-path behaviour for all six public functions.
+//!   - Every error path defined in [`ContractError`].
+//!   - Every emitted event ([`CreatorRegistered`], [`PaymentRecorded`],
+//!     [`SubscriptionCancelled`]) verified via XDR comparison using the
+//!     soroban-sdk 28 `contractevent::to_xdr` style.
 
 #![cfg(test)]
 
+extern crate std;
+
 use soroban_sdk::{
-    symbol_short, testutils::Address as _, vec, Address, Env,
+    symbol_short,
+    testutils::{Address as _, Events},
+    vec, Address, Env, Event,
 };
 
-use crate::{SubscriptionRegistry, SubscriptionRegistryClient, Tier};
+use crate::{
+    ContractError, CreatorRegistered, PaymentRecorded, SubscriptionCancelled,
+    SubscriptionRegistry, SubscriptionRegistryClient, Tier,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Stand up a fresh Env, deploy the contract, and return the client.
-///
-/// The `Env` is returned first so the caller owns it for the lifetime of
-/// the test; the client holds a reference to it.
+/// Stand up a fresh Env, deploy the contract, and return `(env, contract_id)`.
 fn setup() -> (Env, Address) {
     let env = Env::default();
+    // Allow all auth during tests so we don't have to mock individual signers.
+    env.mock_all_auths();
     let contract_id = env.register(SubscriptionRegistry, ());
     (env, contract_id)
 }
 
-/// Build a small Vec<Tier> for use in registration tests.
+/// Build a small `Vec<Tier>` for use in registration tests.
 fn make_tiers(env: &Env) -> soroban_sdk::Vec<Tier> {
     vec![
         env,
@@ -44,7 +53,7 @@ fn make_tiers(env: &Env) -> soroban_sdk::Vec<Tier> {
 }
 
 // ---------------------------------------------------------------------------
-// register_creator
+// register_creator — happy path
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -92,7 +101,30 @@ fn test_register_creator_does_not_reset_existing_stats() {
 }
 
 // ---------------------------------------------------------------------------
-// subscribe
+// register_creator — event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_register_creator_emits_creator_registered_event() {
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let tiers = make_tiers(&env);
+
+    client.register_creator(&creator, &tiers);
+
+    let expected = CreatorRegistered {
+        creator: creator.clone(),
+        tier_count: 2,
+    };
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id),
+        std::vec![expected.to_xdr(&env, &contract_id)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// subscribe — happy path
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -122,11 +154,11 @@ fn test_subscribe_records_payment_event() {
     let history = client.get_subscriber_history(&subscriber, &creator);
     assert_eq!(history.len(), 1);
 
-    let event = history.get(0).unwrap();
-    assert_eq!(event.subscriber, subscriber);
-    assert_eq!(event.creator, creator);
-    assert_eq!(event.amount, 5_000_000_i128); // tier 1 price
-    assert!(!event.is_renewal);
+    let ev = history.get(0).unwrap();
+    assert_eq!(ev.subscriber, subscriber);
+    assert_eq!(ev.creator, creator);
+    assert_eq!(ev.amount, 5_000_000_i128); // tier 1 price
+    assert!(!ev.is_renewal);
 }
 
 #[test]
@@ -147,7 +179,100 @@ fn test_subscribe_accumulates_lifetime_revenue() {
 }
 
 // ---------------------------------------------------------------------------
-// renew
+// subscribe — event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_subscribe_emits_payment_recorded_event() {
+    // Each client invocation is a separate simulated transaction; only events
+    // from the most recent call are visible in env.events().all().  This test
+    // therefore focuses on the subscribe call in isolation.
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    client.subscribe(&subscriber, &creator, &2); // tier 2 = 15_000_000
+
+    let timestamp = env.ledger().timestamp();
+
+    let expected_payment = PaymentRecorded {
+        subscriber: subscriber.clone(),
+        creator: creator.clone(),
+        amount: 15_000_000_i128,
+        timestamp,
+        is_renewal: false,
+    };
+    // After subscribe, env.events() reflects only that invocation.
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id),
+        std::vec![expected_payment.to_xdr(&env, &contract_id)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// subscribe — error paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_subscribe_returns_creator_not_found_for_unregistered_creator() {
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let unregistered_creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    let result = client.try_subscribe(&subscriber, &unregistered_creator, &1);
+    assert_eq!(result, Err(Ok(ContractError::CreatorNotFound)));
+}
+
+#[test]
+fn test_subscribe_returns_tier_not_found_for_invalid_tier() {
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    let result = client.try_subscribe(&subscriber, &creator, &99); // tier 99 does not exist
+    assert_eq!(result, Err(Ok(ContractError::TierNotFound)));
+}
+
+#[test]
+fn test_subscribe_returns_already_subscribed_on_duplicate() {
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    client.subscribe(&subscriber, &creator, &1);
+
+    // Second subscribe for the same (subscriber, creator) pair must fail.
+    let result = client.try_subscribe(&subscriber, &creator, &1);
+    assert_eq!(result, Err(Ok(ContractError::AlreadySubscribed)));
+}
+
+#[test]
+fn test_subscribe_allowed_again_after_cancel() {
+    // After cancelling, a subscriber should be able to re-subscribe.
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    client.subscribe(&subscriber, &creator, &1);
+    client.cancel(&subscriber, &creator);
+
+    // Should succeed after cancel clears the active flag.
+    client.subscribe(&subscriber, &creator, &1);
+    let stats = client.get_creator_stats(&creator);
+    assert_eq!(stats.active_subscribers, 1);
+}
+
+// ---------------------------------------------------------------------------
+// renew — happy path
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -184,7 +309,6 @@ fn test_renew_does_not_change_active_subscriber_count() {
     client.renew(&subscriber, &creator);
 
     let stats = client.get_creator_stats(&creator);
-    // Renewing does not add a new active subscriber.
     assert_eq!(stats.active_subscribers, 1);
 }
 
@@ -197,14 +321,63 @@ fn test_renew_accumulates_lifetime_revenue() {
 
     client.register_creator(&creator, &make_tiers(&env));
     client.subscribe(&subscriber, &creator, &2); // 15_000_000
-    client.renew(&subscriber, &creator);          // +15_000_000
+    client.renew(&subscriber, &creator); // +15_000_000
 
     let stats = client.get_creator_stats(&creator);
     assert_eq!(stats.lifetime_revenue, 30_000_000);
 }
 
 // ---------------------------------------------------------------------------
-// cancel
+// renew — event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_renew_emits_payment_recorded_event_with_is_renewal_true() {
+    // env.events() reflects only the most recent client invocation.
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    client.subscribe(&subscriber, &creator, &1);
+    client.renew(&subscriber, &creator);
+
+    let timestamp = env.ledger().timestamp();
+
+    let expected_renewal = PaymentRecorded {
+        subscriber: subscriber.clone(),
+        creator: creator.clone(),
+        amount: 5_000_000_i128,
+        timestamp,
+        is_renewal: true,
+    };
+    // After renew, env.events() reflects only the renew invocation.
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id),
+        std::vec![expected_renewal.to_xdr(&env, &contract_id)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// renew — error paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_renew_returns_no_subscription_to_renew_with_no_history() {
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    // No subscribe call — renew should fail.
+    let result = client.try_renew(&subscriber, &creator);
+    assert_eq!(result, Err(Ok(ContractError::NoSubscriptionToRenew)));
+}
+
+// ---------------------------------------------------------------------------
+// cancel — happy path
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -253,6 +426,36 @@ fn test_cancel_does_not_underflow_active_subscribers() {
 }
 
 // ---------------------------------------------------------------------------
+// cancel — event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cancel_emits_subscription_cancelled_event() {
+    // env.events() reflects only the most recent client invocation.
+    let (env, contract_id) = setup();
+    let client = SubscriptionRegistryClient::new(&env, &contract_id);
+    let creator = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+
+    client.register_creator(&creator, &make_tiers(&env));
+    client.subscribe(&subscriber, &creator, &1);
+    client.cancel(&subscriber, &creator);
+
+    let timestamp = env.ledger().timestamp();
+
+    let expected_cancel = SubscriptionCancelled {
+        subscriber: subscriber.clone(),
+        creator: creator.clone(),
+        timestamp,
+    };
+    // After cancel, env.events() reflects only the cancel invocation.
+    assert_eq!(
+        env.events().all().filter_by_contract(&contract_id),
+        std::vec![expected_cancel.to_xdr(&env, &contract_id)]
+    );
+}
+
+// ---------------------------------------------------------------------------
 // get_creator_stats
 // ---------------------------------------------------------------------------
 
@@ -285,8 +488,7 @@ fn test_get_subscriber_history_returns_empty_for_no_activity() {
 
 #[test]
 fn test_get_subscriber_history_full_lifecycle() {
-    // subscribe → renew → renew produces 3 events, all on the same
-    // (subscriber, creator) pair, in order.
+    // subscribe → renew → renew produces 3 events, in order.
     let (env, contract_id) = setup();
     let client = SubscriptionRegistryClient::new(&env, &contract_id);
     let creator = Address::generate(&env);
@@ -301,8 +503,8 @@ fn test_get_subscriber_history_full_lifecycle() {
     assert_eq!(history.len(), 3);
 
     assert!(!history.get(0).unwrap().is_renewal); // initial subscribe
-    assert!(history.get(1).unwrap().is_renewal);  // first renewal
-    assert!(history.get(2).unwrap().is_renewal);  // second renewal
+    assert!(history.get(1).unwrap().is_renewal); // first renewal
+    assert!(history.get(2).unwrap().is_renewal); // second renewal
 }
 
 #[test]

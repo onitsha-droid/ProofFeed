@@ -8,28 +8,67 @@
 //!   • Track per-creator aggregate state: active subscriber count, lifetime
 //!     revenue, churn events.
 //!
-//! TODOs for future contributors:
-//!   TODO(auth): All mutating functions should require the caller to be the
-//!     address they are acting on behalf of (subscriber or creator).
-//!     `Address::require_auth()` calls are stubbed with comments to make the
-//!     required slots obvious.
-//!   TODO(payment): The subscribe/renew functions currently do NOT transfer
-//!     stablecoin tokens. A production implementation must invoke the
-//!     stablecoin contract's `transfer` to move funds from the subscriber to
-//!     the creator (or an escrow address). The stablecoin contract address
-//!     should be stored in contract storage during initialisation.
-//!   TODO(tier-validation): subscribe() does not verify that tier_id exists
-//!     in the creator's tier list. Add a bounds-check once the Tier storage
-//!     layout is settled.
-//!   TODO(renewal-window): renew() does not enforce a cooldown or expiry
-//!     window. A production contract should reject renewals that arrive before
-//!     the current subscription period ends.
+//! ## Access Control
+//!
+//! Every mutating function requires the relevant address to authorise the call
+//! via `Address::require_auth()`:
+//!   - `register_creator`: the `creator` address must authorise.
+//!   - `subscribe` / `renew` / `cancel`: the `subscriber` address must
+//!     authorise.
+//!
+//! ## Error Handling
+//!
+//! All invalid-state conditions are surfaced through [`ContractError`], which
+//! is encoded as a `u32` in the Soroban error-type ABI so callers can pattern-
+//! match the error code without inspecting strings.
+//!
+//! ## TODOs for future contributors
+//!
+//! TODO(payment): The subscribe/renew functions do NOT yet transfer stablecoin
+//!   tokens. A production implementation must invoke the stablecoin contract's
+//!   `transfer` to move funds from the subscriber to the creator (or an escrow
+//!   address). The stablecoin contract address should be stored in contract
+//!   storage during initialisation.
+//!
+//! TODO(renewal-window): renew() does not enforce a cooldown or expiry window.
+//!   A production contract should reject renewals that arrive before the
+//!   current subscription period ends.
 
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractevent, contractimpl, contracttype, vec, Address, Env, Vec,
+    contract, contractevent, contractimpl, contracterror, contracttype,
+    vec, Address, Env, Vec,
 };
+
+// ---------------------------------------------------------------------------
+// Error type
+// ---------------------------------------------------------------------------
+
+/// All error conditions that the SubscriptionRegistry contract can return.
+///
+/// Variants are assigned stable `u32` codes so off-chain tooling can map them
+/// to human-readable messages without depending on the contract binary.
+#[contracterror]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ContractError {
+    /// The creator address has no registered tiers; they must call
+    /// `register_creator` first.
+    CreatorNotFound = 1,
+
+    /// The `tier_id` supplied to `subscribe` does not match any tier in the
+    /// creator's registered tier list.
+    TierNotFound = 2,
+
+    /// The subscriber already has an active subscription to this creator (i.e.
+    /// a payment history entry exists with `is_renewal = false` and no
+    /// subsequent cancellation).
+    AlreadySubscribed = 3,
+
+    /// `renew` was called but the subscriber has no prior payment history with
+    /// this creator, so there is nothing to renew.
+    NoSubscriptionToRenew = 4,
+}
 
 // ---------------------------------------------------------------------------
 // Storage key tags
@@ -45,6 +84,9 @@ pub enum DataKey {
     Tiers(Address),
     /// Per-(subscriber, creator) payment history.  Key: (subscriber, creator).
     PaymentHistory(Address, Address),
+    /// Active subscription flag per (subscriber, creator).
+    /// `true` when the subscriber has an active (non-cancelled) subscription.
+    ActiveSub(Address, Address),
 }
 
 // ---------------------------------------------------------------------------
@@ -59,12 +101,24 @@ pub struct CreatorRegistered {
 }
 
 /// Emitted by `subscribe` and `renew`.
+///
+/// This is the primary event consumed by the ProofFeed indexer
+/// (README.md "Architecture") to build retention curves, lifetime revenue
+/// aggregates, and payment entropy scores.
+///
+/// Fields match the README.md event schema exactly:
+///   subscriber, creator, amount, timestamp, is_renewal.
 #[contractevent]
 pub struct PaymentRecorded {
+    /// The wallet that paid.
     pub subscriber: Address,
+    /// The creator being subscribed to.
     pub creator: Address,
+    /// Payment amount in stablecoin base units (e.g. stroops for USDC-on-Stellar).
     pub amount: i128,
+    /// Ledger timestamp at the time of the call (seconds since Unix epoch).
     pub timestamp: u64,
+    /// `false` for an initial subscription, `true` for a renewal.
     pub is_renewal: bool,
 }
 
@@ -73,6 +127,7 @@ pub struct PaymentRecorded {
 pub struct SubscriptionCancelled {
     pub subscriber: Address,
     pub creator: Address,
+    /// Ledger timestamp at the time of cancellation.
     pub timestamp: u64,
 }
 
@@ -90,8 +145,6 @@ pub struct Tier {
     /// (e.g. stroops for USDC-on-Stellar).
     pub price: i128,
     /// Human-readable label (e.g. "Basic", "Pro").
-    /// TODO(encoding): Currently stored as a raw symbol; consider a
-    /// Bytes field for longer names once the UX requirements are clear.
     pub name: soroban_sdk::Symbol,
 }
 
@@ -144,13 +197,24 @@ impl SubscriptionRegistry {
 
     /// Register a creator and their initial set of subscription tiers.
     ///
-    /// Overwrites any previously registered tier list for the same creator.
-    /// If the creator has no existing `CreatorStats` record one is created
-    /// with all counters zeroed.
+    /// The `creator` address must authorise this call — it is not possible
+    /// for a third party to register on behalf of a creator.
     ///
-    /// TODO(auth): add `creator.require_auth()` before writing storage.
+    /// Overwrites any previously registered tier list for the same creator.
+    /// If the creator has no existing [`CreatorStats`] record, one is created
+    /// with all counters zeroed.  A re-registration does NOT reset counters.
+    ///
+    /// Emits [`CreatorRegistered`].
+    ///
+    /// # Errors
+    ///
+    /// This function is infallible — there is no invalid state it can reach
+    /// (a creator is free to re-register at any time).
     pub fn register_creator(env: Env, creator: Address, tiers: Vec<Tier>) {
-        // TODO(auth): creator.require_auth();
+        // Access control: only the creator themselves may register.
+        creator.require_auth();
+
+        let tier_count = tiers.len();
 
         // Persist the tier list.
         env.storage()
@@ -176,7 +240,7 @@ impl SubscriptionRegistry {
 
         env.events().publish_event(&CreatorRegistered {
             creator,
-            tier_count: tiers.len(),
+            tier_count,
         });
     }
 
@@ -187,24 +251,63 @@ impl SubscriptionRegistry {
     /// Record a new subscription from `subscriber` to `creator` under
     /// `tier_id`.
     ///
-    /// Emits a `PaymentRecorded` event with `is_renewal = false`.
-    /// Increments `active_subscribers` and `lifetime_revenue` in
-    /// `CreatorStats`.
+    /// The `subscriber` address must authorise this call.
     ///
-    /// TODO(auth): add `subscriber.require_auth()`.
+    /// Emits a [`PaymentRecorded`] event with `is_renewal = false`.
+    /// Increments `active_subscribers` and `lifetime_revenue` in
+    /// [`CreatorStats`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::CreatorNotFound`] — the creator has never called
+    ///   `register_creator`.
+    /// - [`ContractError::TierNotFound`] — `tier_id` does not exist in the
+    ///   creator's current tier list.
+    /// - [`ContractError::AlreadySubscribed`] — the subscriber already has an
+    ///   active subscription to this creator.
+    ///
+    /// # TODOs
+    ///
     /// TODO(payment): transfer stablecoin from subscriber to creator.
-    /// TODO(tier-validation): verify tier_id exists in creator's tier list
-    ///   and use its price rather than hard-coding 0.
     pub fn subscribe(
         env: Env,
         subscriber: Address,
         creator: Address,
         tier_id: u32,
-    ) {
-        // TODO(auth): subscriber.require_auth();
+    ) -> Result<(), ContractError> {
+        // Access control: only the subscriber themselves may subscribe.
+        subscriber.require_auth();
 
-        let amount = Self::tier_price(&env, &creator, tier_id);
+        // Guard: creator must be registered.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Tiers(creator.clone()))
+        {
+            return Err(ContractError::CreatorNotFound);
+        }
+
+        // Guard: tier must exist and retrieve its price.
+        let amount = Self::tier_price(&env, &creator, tier_id)
+            .ok_or(ContractError::TierNotFound)?;
+
+        // Guard: no duplicate active subscription.
+        let already_active: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ActiveSub(subscriber.clone(), creator.clone()))
+            .unwrap_or(false);
+        if already_active {
+            return Err(ContractError::AlreadySubscribed);
+        }
+
         let timestamp = env.ledger().timestamp();
+
+        // Mark subscription as active.
+        env.storage().persistent().set(
+            &DataKey::ActiveSub(subscriber.clone(), creator.clone()),
+            &true,
+        );
 
         // Record payment event in subscriber history.
         let event = PaymentEvent {
@@ -233,6 +336,8 @@ impl SubscriptionRegistry {
             timestamp,
             is_renewal: false,
         });
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -241,25 +346,39 @@ impl SubscriptionRegistry {
 
     /// Record a subscription renewal for an existing subscriber/creator pair.
     ///
-    /// Emits a `PaymentRecorded` event with `is_renewal = true`.
+    /// The `subscriber` address must authorise this call.
+    ///
+    /// Emits a [`PaymentRecorded`] event with `is_renewal = true`.
     /// Adds to `lifetime_revenue`; does NOT change `active_subscribers`
     /// because the subscriber is already counted as active.
     ///
-    /// TODO(auth): add `subscriber.require_auth()`.
+    /// The renewal amount is taken from the subscriber's most recent payment
+    /// entry, so the price always matches the tier the subscriber is on.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NoSubscriptionToRenew`] — the subscriber has no
+    ///   payment history with this creator (they must call `subscribe` first).
+    ///
+    /// # TODOs
+    ///
     /// TODO(payment): transfer stablecoin from subscriber to creator.
-    /// TODO(renewal-window): enforce that a previous subscription exists and
-    ///   the renewal window is open.
-    pub fn renew(env: Env, subscriber: Address, creator: Address) {
-        // TODO(auth): subscriber.require_auth();
+    /// TODO(renewal-window): reject renewals that arrive before the current
+    ///   subscription period ends.
+    pub fn renew(
+        env: Env,
+        subscriber: Address,
+        creator: Address,
+    ) -> Result<(), ContractError> {
+        // Access control: only the subscriber themselves may renew.
+        subscriber.require_auth();
 
         // Derive renewal amount from the subscriber's most recent payment.
         let history = Self::load_history(&env, &subscriber, &creator);
-        // TODO(renewal-window): return an error if history is empty.
-        let amount = if history.is_empty() {
-            0_i128
-        } else {
-            history.get(history.len() - 1).unwrap().amount
-        };
+        if history.is_empty() {
+            return Err(ContractError::NoSubscriptionToRenew);
+        }
+        let amount = history.get(history.len() - 1).unwrap().amount;
 
         let timestamp = env.ledger().timestamp();
 
@@ -286,6 +405,8 @@ impl SubscriptionRegistry {
             timestamp,
             is_renewal: true,
         });
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -294,15 +415,24 @@ impl SubscriptionRegistry {
 
     /// Record a subscription cancellation.
     ///
+    /// The `subscriber` address must authorise this call.
+    ///
     /// Decrements `active_subscribers` (floored at 0) and increments
-    /// `churn_events` in `CreatorStats`.
+    /// `churn_events` in [`CreatorStats`].  Clears the active-subscription
+    /// flag so the subscriber may re-subscribe in future.
     ///
-    /// Does NOT emit a `PaymentRecorded` event because no money moves on
-    /// cancel.
+    /// Emits [`SubscriptionCancelled`].
     ///
-    /// TODO(auth): add `subscriber.require_auth()`.
+    /// No money moves on cancel so no [`PaymentRecorded`] event is emitted.
     pub fn cancel(env: Env, subscriber: Address, creator: Address) {
-        // TODO(auth): subscriber.require_auth();
+        // Access control: only the subscriber themselves may cancel.
+        subscriber.require_auth();
+
+        // Clear active-subscription flag.
+        env.storage().persistent().set(
+            &DataKey::ActiveSub(subscriber.clone(), creator.clone()),
+            &false,
+        );
 
         let mut stats = Self::load_or_default_stats(&env, &creator);
         stats.active_subscribers = stats.active_subscribers.saturating_sub(1);
@@ -324,7 +454,7 @@ impl SubscriptionRegistry {
 
     /// Return the current aggregate stats for a creator.
     ///
-    /// Returns a zeroed `CreatorStats` if the creator has never been
+    /// Returns a zeroed [`CreatorStats`] if the creator has never been
     /// registered (caller should treat this as "not found").
     pub fn get_creator_stats(env: Env, creator: Address) -> CreatorStats {
         Self::load_or_default_stats(&env, &creator)
@@ -334,7 +464,7 @@ impl SubscriptionRegistry {
     // get_subscriber_history
     // -----------------------------------------------------------------------
 
-    /// Return all recorded `PaymentEvent`s for a (subscriber, creator) pair,
+    /// Return all recorded [`PaymentEvent`]s for a (subscriber, creator) pair,
     /// ordered from oldest to newest.
     ///
     /// Returns an empty list if no history exists.
@@ -389,11 +519,10 @@ impl SubscriptionRegistry {
         );
     }
 
-    /// Look up the price for a given tier_id.
+    /// Look up the price for a given `tier_id`.
     ///
-    /// Returns 0 if the creator is not registered or the tier is not found.
-    /// TODO(tier-validation): propagate an error instead of silently returning 0.
-    fn tier_price(env: &Env, creator: &Address, tier_id: u32) -> i128 {
+    /// Returns `Some(price)` if the tier exists, `None` otherwise.
+    fn tier_price(env: &Env, creator: &Address, tier_id: u32) -> Option<i128> {
         let tiers: Vec<Tier> = env
             .storage()
             .persistent()
@@ -403,11 +532,10 @@ impl SubscriptionRegistry {
         for i in 0..tiers.len() {
             let tier = tiers.get(i).unwrap();
             if tier.id == tier_id {
-                return tier.price;
+                return Some(tier.price);
             }
         }
-        // TODO(tier-validation): return an error here instead.
-        0
+        None
     }
 }
 

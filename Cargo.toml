@@ -2,4 +2,5 @@
 resolver = "2"
 members = [
     "contracts/subscription_registry",
+    "contracts/reputation_stake",
 ]

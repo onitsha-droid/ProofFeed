@@ -22,6 +22,7 @@ dotenv.config();
 import { Pool } from 'pg';
 import { migrate } from './db/migrate';
 import { startListener } from './listener';
+import { startApi } from './api';
 
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
@@ -54,10 +55,17 @@ async function main(): Promise<void> {
   console.log('[indexer] Migrations complete.');
 
   // ------------------------------------------------------------------
+  // Start REST API server
+  // ------------------------------------------------------------------
+  const apiPort = process.env.API_PORT ? Number(process.env.API_PORT) : 3001;
+  const apiServer = startApi(pool, apiPort);
+
+  // ------------------------------------------------------------------
   // Graceful shutdown
   // ------------------------------------------------------------------
   const shutdown = async (signal: string) => {
     console.log(`\n[indexer] Received ${signal}, shutting down…`);
+    apiServer.close();
     await pool.end();
     console.log('[indexer] DB pool closed. Goodbye.');
     process.exit(0);

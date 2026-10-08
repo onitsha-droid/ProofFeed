@@ -1,0 +1,18 @@
+{
+  "name": "prooffeed",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "indexer",
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:creator": "npm run dev --workspace=apps/creator-dashboard",
+    "dev:brand": "npm run dev --workspace=apps/brand-dashboard",
+    "dev:indexer": "npm run dev --workspace=indexer",
+    "build:creator": "npm run build --workspace=apps/creator-dashboard",
+    "build:brand": "npm run build --workspace=apps/brand-dashboard",
+    "build": "npm run build:creator && npm run build:brand"
+  }
+}

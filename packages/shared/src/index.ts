@@ -19,8 +19,10 @@ export interface CreatorMetrics {
   /**
    * Total revenue received over the creator's lifetime, in stroops.
    * 1 USDC = 10,000,000 stroops.
+   * Stored as string to avoid precision loss for values exceeding
+   * Number.MAX_SAFE_INTEGER (possible for very high-volume creators).
    */
-  lifetimeRevenueStroops: number;
+  lifetimeRevenueStroops: string;
 
   /**
    * Total number of subscription cancellation events recorded on-chain.
@@ -35,8 +37,10 @@ export interface CreatorMetrics {
    *
    * IMPORTANT: This is a confidence signal only — not proof of fraud or its absence.
    * See README Anti-Fraud & Sybil Resistance section.
+   *
+   * null when there are fewer than 2 payments recorded (insufficient data).
    */
-  entropyScore: number;
+  entropyScore: number | null;
 }
 
 /**

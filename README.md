@@ -215,12 +215,13 @@ Full on-chain transparency creates tension with subscriber privacy. ProofFeed's 
 
 ## Roadmap
 
-- [ ] `SubscriptionRegistry` contract (subscribe, renew, cancel, stats)
-- [ ] Creator dashboard: onboarding, tier setup, self-view of verified stats
-- [ ] Brand dashboard: lookup by contract address, auto-generated proof-of-audience report
-- [ ] Shareable, live-resolving verification badge
-- [ ] Payment entropy scoring engine
-- [ ] `ReputationStake` contract + dispute/arbitration flow
+- [x] `SubscriptionRegistry` contract (subscribe, renew, cancel, stats)
+- [x] Creator dashboard: onboarding, tier setup, self-view of verified stats
+- [x] Brand dashboard: lookup by contract address, auto-generated proof-of-audience report
+- [x] Shareable, live-resolving verification badge
+- [x] Payment entropy scoring engine
+- [x] `ReputationStake` contract + dispute/arbitration flow
+      *(contract implemented and tested; brand-facing UI surface for staking/dispute status not yet built)*
 - [ ] `SponsorshipEscrow` contract for performance-based sponsorship payouts
 - [ ] Multi-currency / anchor integration for regional stablecoin rails
 - [ ] Zero-knowledge aggregate proofs (research phase)

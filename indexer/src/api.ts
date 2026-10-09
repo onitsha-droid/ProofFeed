@@ -22,16 +22,16 @@ import { Pool } from 'pg';
 // ---------------------------------------------------------------------------
 
 interface CreatorMetricsRow {
-  creator: string;
+  creator_address: string;
   active_subscribers: string; // pg returns numeric columns as strings
   lifetime_revenue_stroops: string;
   churn_events: string;
   entropy_score: string;
-  updated_at: string;
+  last_computed_at: string;
 }
 
 interface CohortRetentionRow {
-  creator: string;
+  creator_address: string;
   cohort_month: string;
   months_since_join: string;
   cohort_size: string;
@@ -65,14 +65,14 @@ function makeRouter(pool: Pool): express.Router {
       try {
         const result = await pool.query<CreatorMetricsRow>(
           `SELECT
-             creator,
+             creator_address,
              active_subscribers,
              lifetime_revenue_stroops,
              churn_events,
              entropy_score,
-             updated_at
+             last_computed_at
            FROM creator_metrics
-           WHERE creator = $1`,
+           WHERE creator_address = $1`,
           [address]
         );
 
@@ -122,7 +122,7 @@ function makeRouter(pool: Pool): express.Router {
              retained_count,
              retention_rate
            FROM cohort_retention
-           WHERE creator = $1
+           WHERE creator_address = $1
            ORDER BY cohort_month ASC, months_since_join ASC`,
           [address]
         );

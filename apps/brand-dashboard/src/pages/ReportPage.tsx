@@ -15,10 +15,21 @@ function truncateAddress(address: string): string {
   return `${address.slice(0, 8)}…${address.slice(-8)}`;
 }
 
-function stroopsToUsdc(stroops: number): string {
-  // 1 XLM / USDC = 10,000,000 stroops
-  const usdc = stroops / 10_000_000;
-  return usdc.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/**
+ * Convert a stroops string to a human-readable USDC amount.
+ * 1 USDC = 10,000,000 stroops.
+ *
+ * Accepts the value as a string (not number) because lifetimeRevenueStroops
+ * can exceed Number.MAX_SAFE_INTEGER (~9 quadrillion stroops ≈ $900M USDC)
+ * for high-volume creators, causing precision loss with plain JS numbers.
+ */
+function stroopsToUsdc(stroops: string): string {
+  const n = BigInt(stroops);
+  const whole = n / 10_000_000n;
+  const remainder = n % 10_000_000n;
+  // Two decimal places; pad remainder to 7 digits then take first 2.
+  const cents = remainder.toString().padStart(7, '0').slice(0, 2);
+  return `${whole.toLocaleString('en-US')}.${cents}`;
 }
 
 export function ReportPage() {

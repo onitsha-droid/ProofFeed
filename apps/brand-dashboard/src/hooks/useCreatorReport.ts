@@ -2,9 +2,15 @@ import { useEffect, useState } from 'react';
 
 export interface CreatorMetrics {
   activeSubscribers: number;
-  lifetimeRevenueStroops: number;
+  /**
+   * Total revenue in stroops as a string. Kept as string (not number) to avoid
+   * precision loss for large values that exceed Number.MAX_SAFE_INTEGER.
+   * 1 USDC = 10,000,000 stroops.
+   */
+  lifetimeRevenueStroops: string;
   churnEvents: number;
-  entropyScore: number;
+  /** 0–1 irregularity score, or null when insufficient data is available. */
+  entropyScore: number | null;
 }
 
 export interface RetentionPoint {

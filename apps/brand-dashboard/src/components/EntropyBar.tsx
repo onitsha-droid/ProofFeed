@@ -1,7 +1,8 @@
 import React from 'react';
 
 interface EntropyBarProps {
-  score: number; // 0–1
+  /** 0–1 irregularity score, or null when insufficient data is available. */
+  score: number | null;
   disclaimer: string;
 }
 
@@ -18,6 +19,50 @@ function getEntropyLabel(score: number): string {
 }
 
 export function EntropyBar({ score, disclaimer }: EntropyBarProps) {
+  // Null means insufficient payment data to compute a score yet.
+  if (score === null) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <span style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)' }}>
+            Payment Pattern Irregularity Score
+          </span>
+          <span style={{ fontSize: '1.1rem', color: 'var(--color-text-muted)' }}>
+            — / 1.00
+          </span>
+        </div>
+        <div
+          style={{
+            height: 12,
+            borderRadius: 6,
+            background: 'var(--color-surface-2)',
+          }}
+          role="progressbar"
+          aria-valuenow={0}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label="Entropy score: insufficient data"
+        />
+        <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
+          Insufficient data — score appears after more payments are recorded
+        </span>
+        <p
+          style={{
+            fontSize: '0.75rem',
+            color: 'var(--color-text-muted)',
+            lineHeight: 1.5,
+            padding: '10px 14px',
+            background: 'var(--color-surface-2)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius)',
+          }}
+        >
+          {disclaimer}
+        </p>
+      </div>
+    );
+  }
+
   const clamped = Math.min(1, Math.max(0, score));
   const pct = Math.round(clamped * 100);
   const color = getEntropyColor(clamped);

@@ -50,7 +50,10 @@ export function BadgePage() {
     const ogTitle = `ProofFeed Verified — ${truncateAddress(creatorAddress)}`;
     const ogDesc =
       `${metrics.activeSubscribers.toLocaleString()} active subscribers · ` +
-      `Entropy score ${metrics.entropyScore.toFixed(2)} · Verified live from Stellar blockchain`;
+      (metrics.entropyScore !== null
+        ? `Entropy score ${metrics.entropyScore.toFixed(2)} · `
+        : '') +
+      `Verified live from Stellar blockchain`;
 
     // og:title
     let metaTitle = document.querySelector<HTMLMetaElement>('meta[property="og:title"]');
@@ -193,7 +196,7 @@ export function BadgePage() {
           <StatPill label="Active Subscribers" value={metrics.activeSubscribers.toLocaleString()} />
           <StatPill
             label="Entropy Score"
-            value={metrics.entropyScore.toFixed(2)}
+            value={metrics.entropyScore !== null ? metrics.entropyScore.toFixed(2) : '—'}
             subtitle="/ 1.00"
           />
         </div>
